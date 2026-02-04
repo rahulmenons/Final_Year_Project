@@ -12,6 +12,7 @@ from .services import (
     DocumentSummarizer,
     evaluate_and_save,   # ✅ NEW IMPORT
     RFPMetadataExtractor,
+    index_document,
 )
 
 
@@ -63,7 +64,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             # 4) NEW: Extract RFP metadata (budget, timeline, team size)
             print("Extracting RFP metadata (budget/timeline/team size)...")
             metadata_extractor = RFPMetadataExtractor()
-            meta = metadata_extractor.extract_metadata(text)
+            meta = metadata_extractor.extract_metadata()
             print("🎯 EXTRACTED RFP METADATA (from Gemini)")
             print(meta)
             print(f"Metadata extracted: {meta}")
@@ -90,6 +91,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     rfp_timeline_weeks=rfp_timeline_weeks,
                     rfp_team_size_required=rfp_team_size_required,
                 )
+                
+                #RAG Indexing
+                index_document(document, text)
+
                 
                 for keyword_text, score in keywords_with_scores:
                     keyword, created = Keyword.objects.get_or_create(

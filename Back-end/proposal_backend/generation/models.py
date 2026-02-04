@@ -200,3 +200,18 @@ class RFPEvaluation(models.Model):
 
     def __str__(self):
         return f"Evaluation for {self.document.filename} ({self.decision})"
+
+class DocumentChunk(models.Model):
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="chunks"
+    )
+
+    text = models.TextField()
+    embedding = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Chunk {self.id} - {self.document.filename}"
+

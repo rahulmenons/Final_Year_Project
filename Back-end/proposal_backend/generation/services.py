@@ -14,8 +14,58 @@ from docx import Document as DocxDocument
 # --- Keyword Extraction Dependencies (Local ML) ---
 from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
+_embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+#------------------------------------
+# Chucking function
+#------------------------------------
 
-from .models import CompanyCapability, Document, RFPEvaluation
+def chunk_text(text, size=500, overlap=100):
+    words = text.split()
+    chunks = []
+
+    for i in range(0, len(words), size - overlap):
+        chunks.append(" ".join(words[i:i+size]))
+
+    return chunks
+
+# Indexing document into vectors
+
+def index_document(document, text):
+    chunks = chunk_text(text)
+
+    for chunk in chunks:
+        emb = _embedding_model.encode(chunk).tolist()
+
+        DocumentChunk.objects.create(
+            document=document,
+            text=chunk,
+            embedding=emb,
+        )
+ #----------------------------
+ # Retrieve relevant chunks for a query
+ #----------------------------
+def retrieve_chunks(query, top_k=5):
+    q_emb = _embedding_model.encode(query)
+
+    scored = []
+
+    for c in DocumentChunk.objects.all():
+        emb = np.array(c.embedding)
+
+        # cosine similarity
+        sim = np.dot(q_emb, emb) / (np.linalg.norm(q_emb) * np.linalg.norm(emb))
+
+        scored.append((sim, c.text))
+
+    scored.sort(reverse=True)
+
+    return [t for _, t in scored[:top_k]]
+
+
+
+
+from .models import CompanyCapability, Document, RFPEvaluation, DocumentChunk
+import numpy as np
 
 class DocumentParser:
     @staticmethod
@@ -94,7 +144,6 @@ class KeywordExtractor:
         except Exception as e:
             raise Exception(f"Error extracting keywords: {str(e)}")
 
-
 # ----------------------------
 # DocumentSummarizer (unchanged except GEMINI key use)
 # ----------------------------
@@ -104,7 +153,7 @@ class DocumentSummarizer:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            api_key = "AIzaSyALEE6TVeuZW8iHfqb0ximU75mm9v4BTfU"
+            api_key = "AIzaSyBXRIZ0NCK9Akds-6zQGdX84ma353BnuUs"
             if not api_key:
                 print("GEMINI_API_KEY not set; summaries will fail.")
                 cls._instance.model = None
@@ -131,41 +180,30 @@ class DocumentSummarizer:
 # ----------------------------
 # RFPMetadataExtractor (UPDATED)
 # ----------------------------
+# ----------------------------
+# RFPMetadataExtractor (RAG VERSION)
+# ----------------------------
+
 class RFPMetadataExtractor:
-    """
-    Uses Gemini to extract structured fields (budget, timeline, team size, EMD, submission/analysis days)
-    from unstructured RFP text. Logs the extracted JSON to the server console.
-    """
     _instance = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            api_key = "AIzaSyALEE6TVeuZW8iHfqb0ximU75mm9v4BTfU"
+            api_key = "AIzaSyBXRIZ0NCK9Akds-6zQGdX84ma353BnuUs"
+
             if not api_key:
-                print("GEMINI_API_KEY not set; RFP metadata extraction will fail.")
                 cls._instance.model = None
             else:
                 genai.configure(api_key=api_key)
                 cls._instance.model = genai.GenerativeModel("models/gemini-2.5-flash")
+
         return cls._instance
 
-    def extract_metadata(self, text: str) -> dict:
-        """
-        Returns:
-        {
-          "budget_in_inr": int|null,
-          "emd_in_inr": int|null,
-          "timeline_weeks": int|null,
-          "no_of_days_for_analysis": int|null,
-          "no_of_days_for_submission": int|null,
-          "team_size_required": int|null,
-          "confidence": "high|medium|low",
-          "notes": "..."
-        }
-        """
-        if not self.model or not text or len(text.strip()) < 50:
-            result = {
+    def extract_metadata(self, query_hint="budget timeline emd team size") -> dict:
+
+        if not self.model:
+            return {
                 "budget_in_inr": None,
                 "emd_in_inr": None,
                 "timeline_weeks": None,
@@ -173,69 +211,60 @@ class RFPMetadataExtractor:
                 "no_of_days_for_submission": None,
                 "team_size_required": None,
                 "confidence": "low",
-                "notes": "Not enough text or model not configured.",
+                "notes": "Gemini not configured.",
             }
-            # Log immediately
-            print("\n🔍 RFP metadata extraction (skipped) — not enough text or model not set.")
-            print(result)
-            return result
 
-        prompt = (
-            "You are an assistant that extracts structured information from RFP (Request for Proposal) documents.\n\n"
-            "Read the following RFP text and extract:\n"
-            "- project budget (convert to a single integer in INR, e.g. 800000 for ₹8,00,000),\n"
-            "- earnest Money Deposit (EMD) if mentioned (convert to integer in INR, or null if not mentioned),\n"
-            "- overall project timeline in weeks,\n"
-            "- no. of days for analysis of the project timeline,\n"
-            "- no. of days for submission of detailed project,\n"
-            "- approximate team size required.\n\n"
-            "If something is not explicitly mentioned, make your BEST REASONABLE GUESS based on the context,\n"
-            "but mark confidence as \"low\", \"medium\", or \"high\".\n\n"
-            "RESPOND WITH JSON ONLY in this exact format:\n\n"
-            '{\n'
-            '  "budget_in_inr": <integer or null>,\n'
-            '  "emd_in_inr": <integer or null>,\n'
-            '  "timeline_weeks": <integer or null>,\n'
-            '  "no_of_days_for_analysis": <integer or null>,\n'
-            '  "no_of_days_for_submission": <integer or null>,\n'
-            '  "team_size_required": <integer or null>,\n'
-            '  "confidence": "<high|medium|low>",\n'
-            '  "notes": "<short explanation>"\n'
-            '}\n\n'
-            "Do NOT include any extra text outside the JSON.\n\n"
-            "RFP TEXT:\n"
-        )
+        # 🔥 RAG retrieval
+        budget_ctx = retrieve_chunks("project budget estimated cost", 3)
+        timeline_ctx = retrieve_chunks("project timeline milestones days weeks schedule", 3)
+        emd_ctx = retrieve_chunks("earnest money deposit emd", 2)
+        team_ctx = retrieve_chunks("team size staffing manpower professionals", 2)
+        no_days_submission_ctx = retrieve_chunks("days for submission", 2)
+        no_days_analysis_ctx = retrieve_chunks("days for analysis", 2)
+        chunks = budget_ctx + timeline_ctx + emd_ctx + team_ctx + no_days_submission_ctx + no_days_analysis_ctx
 
-        full_prompt = prompt + "\n" + text[:15000]  # truncate to avoid huge prompts
 
-        # Call Gemini
-        resp = self.model.generate_content(full_prompt)
-        raw = resp.text.strip()
+        if not chunks:
+            return {
+                "budget_in_inr": None,
+                "emd_in_inr": None,
+                "timeline_weeks": None,
+                "no_of_days_for_analysis": None,
+                "no_of_days_for_submission": None,
+                "team_size_required": None,
+                "confidence": "low",
+                "notes": "No relevant chunks retrieved.",
+            }
 
-        # Try to parse JSON robustly
-        data = None
+        context = "\n\n".join(chunks)
+
+        prompt = f"""
+Extract structured RFP info using ONLY this context.
+
+Return JSON ONLY:
+
+{{
+  "budget_in_inr": <int or null>,
+  "emd_in_inr": <int or null>,
+  "timeline_weeks": <int or null>,
+  "no_of_days_for_analysis": <int or null>,
+  "no_of_days_for_submission": <int or null>,
+  "team_size_required": <int or null>,
+  "confidence": "<high|medium|low>",
+  "notes": "<short explanation>"
+}}
+
+Context:
+{context}
+"""
+
+        raw = self.model.generate_content(prompt).text.strip()
+
         try:
-            data = json.loads(raw)
+            js = raw[raw.find("{"):raw.rfind("}")+1]
+            data = json.loads(js)
         except Exception:
-            # Attempt to extract JSON substring
-            try:
-                json_start = raw.find("{")
-                json_end = raw.rfind("}") + 1
-                if json_start != -1 and json_end != -1 and json_end > json_start:
-                    json_sub = raw[json_start:json_end]
-                    data = json.loads(json_sub)
-                else:
-                    data = None
-            except Exception:
-                data = None
-
-        if not data:
-            # Last-resort: try to find key-like pairs with simple heuristics (very permissive)
-            print("\n⚠️ Warning: Failed to parse JSON directly from Gemini response.")
-            print("Raw response preview (first 1000 chars):")
-            print(raw[:1000])
-            # Return a low-confidence result
-            result = {
+            return {
                 "budget_in_inr": None,
                 "emd_in_inr": None,
                 "timeline_weeks": None,
@@ -243,74 +272,32 @@ class RFPMetadataExtractor:
                 "no_of_days_for_submission": None,
                 "team_size_required": None,
                 "confidence": "low",
-                "notes": "Failed to parse JSON from model response.",
+                "notes": "JSON parse failed",
             }
-            print("\n🔍 RFP metadata (FAILED to parse):")
-            print(result)
-            return result
 
-        # Normalize ints
-        def to_int_or_none(v):
+        def safe(v):
             try:
-                if v is None:
-                    return None
-                if isinstance(v, (int, float)):
-                    return int(v)
-                # allow strings like "800000", "8,00,000", "5 lakhs"
-                s = str(v).strip()
-                # remove commas and currency symbols and words
-                s = s.replace(",", "")
-                s = s.replace("₹", "")
-                s = s.lower().replace("inr", "").strip()
-                # handle lakhs/crores
-                if "lakh" in s or "lac" in s:
-                    # convert "5 lakh" -> 500000
-                    num = float("".join(ch for ch in s if (ch.isdigit() or ch == ".")))
-                    return int(num * 100000)
+                s = str(v).lower().replace(",", "").replace("₹", "")
+                if "lakh" in s:
+                    return int(float("".join(c for c in s if c.isdigit() or c==".")) * 100000)
                 if "crore" in s:
-                    num = float("".join(ch for ch in s if (ch.isdigit() or ch == ".")))
-                    return int(num * 10000000)
-                # strip non-digit
-                cleaned = ""
-                for ch in s:
-                    if ch.isdigit() or ch == ".":
-                        cleaned += ch
-                if cleaned == "":
-                    return None
-                return int(float(cleaned))
-            except Exception:
+                    return int(float("".join(c for c in s if c.isdigit() or c==".")) * 10000000)
+                return int(float("".join(c for c in s if c.isdigit() or c==".")))
+            except:
                 return None
 
         result = {
-            "budget_in_inr": to_int_or_none(data.get("budget_in_inr")),
-            "emd_in_inr": to_int_or_none(data.get("emd_in_inr") or data.get("emd") or data.get("emd_in_inr")),
-            "timeline_weeks": to_int_or_none(data.get("timeline_weeks")),
-            "no_of_days_for_analysis": to_int_or_none(data.get("no_of_days_for_analysis")),
-            "no_of_days_for_submission": to_int_or_none(data.get("no_of_days_for_submission")),
-            "team_size_required": to_int_or_none(data.get("team_size_required")),
+            "budget_in_inr": safe(data.get("budget_in_inr")),
+            "emd_in_inr": safe(data.get("emd_in_inr")),
+            "timeline_weeks": safe(data.get("timeline_weeks")),
+            "no_of_days_for_analysis": safe(data.get("no_of_days_for_analysis")),
+            "no_of_days_for_submission": safe(data.get("no_of_days_for_submission")),
+            "team_size_required": safe(data.get("team_size_required")),
             "confidence": data.get("confidence", "low"),
             "notes": data.get("notes", ""),
         }
 
-        # Pretty log the extraction results to the server console
-        try:
-            print("\n" + "=" * 40)
-            print("🎯 EXTRACTED RFP METADATA (from Gemini)")
-            print("=" * 40)
-            print(f"Budget (INR): {result['budget_in_inr']}")
-            print(f"EMD (INR): {result['emd_in_inr']}")
-            print(f"Timeline (weeks): {result['timeline_weeks']}")
-            print(f"Days for analysis: {result['no_of_days_for_analysis']}")
-            print(f"Days for submission: {result['no_of_days_for_submission']}")
-            print(f"Team size required: {result['team_size_required']}")
-            print(f"Confidence: {result['confidence']}")
-            if result.get("notes"):
-                print(f"Notes: {result['notes']}")
-            print("=" * 40 + "\n")
-        except Exception:
-            # fallback simple print
-            print("Extracted metadata:", result)
-
+        print("\n🎯 RAG METADATA:", result)
         return result
 
 # ----------------------------
