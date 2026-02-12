@@ -153,7 +153,7 @@ class DocumentSummarizer:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            api_key = "AIzaSyBXRIZ0NCK9Akds-6zQGdX84ma353BnuUs"
+            api_key = "API_KEY_HERE"
             if not api_key:
                 print("GEMINI_API_KEY not set; summaries will fail.")
                 cls._instance.model = None
@@ -178,9 +178,6 @@ class DocumentSummarizer:
 
 
 # ----------------------------
-# RFPMetadataExtractor (UPDATED)
-# ----------------------------
-# ----------------------------
 # RFPMetadataExtractor (RAG VERSION)
 # ----------------------------
 
@@ -190,7 +187,7 @@ class RFPMetadataExtractor:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            api_key = "AIzaSyBXRIZ0NCK9Akds-6zQGdX84ma353BnuUs"
+            api_key = "API_KEY_HERE"
 
             if not api_key:
                 cls._instance.model = None
@@ -209,7 +206,6 @@ class RFPMetadataExtractor:
                 "timeline_weeks": None,
                 "no_of_days_for_analysis": None,
                 "no_of_days_for_submission": None,
-                "team_size_required": None,
                 "confidence": "low",
                 "notes": "Gemini not configured.",
             }
@@ -231,7 +227,7 @@ class RFPMetadataExtractor:
                 "timeline_weeks": None,
                 "no_of_days_for_analysis": None,
                 "no_of_days_for_submission": None,
-                "team_size_required": None,
+            
                 "confidence": "low",
                 "notes": "No relevant chunks retrieved.",
             }
@@ -249,7 +245,6 @@ Return JSON ONLY:
   "timeline_weeks": <int or null>,
   "no_of_days_for_analysis": <int or null>,
   "no_of_days_for_submission": <int or null>,
-  "team_size_required": <int or null>,
   "confidence": "<high|medium|low>",
   "notes": "<short explanation>"
 }}
@@ -270,7 +265,6 @@ Context:
                 "timeline_weeks": None,
                 "no_of_days_for_analysis": None,
                 "no_of_days_for_submission": None,
-                "team_size_required": None,
                 "confidence": "low",
                 "notes": "JSON parse failed",
             }
@@ -292,7 +286,6 @@ Context:
             "timeline_weeks": safe(data.get("timeline_weeks")),
             "no_of_days_for_analysis": safe(data.get("no_of_days_for_analysis")),
             "no_of_days_for_submission": safe(data.get("no_of_days_for_submission")),
-            "team_size_required": safe(data.get("team_size_required")),
             "confidence": data.get("confidence", "low"),
             "notes": data.get("notes", ""),
         }
@@ -325,24 +318,34 @@ def _safe_int(value, default=0):
     except Exception:
         return default
 
-
+# ----------------------------
+# computing technical fit by comparing embeddings to keywords.
 def _compute_technical_fit(document: Document, cap: CompanyCapability) -> float:
     """
-    How well RFP keywords match company tech_keywords (0–100).
+    Semantic technical fit using embeddings.
+    0–100 scale.
     """
-    # keywords linked to this document
-    doc_keywords = set(document.keywords.values_list("keyword__keyword", flat=True))
-    doc_keywords = {k.lower().strip() for k in doc_keywords if k}
-
-    # company capability tech stack
-    company_keywords = {k.lower().strip() for k in (cap.tech_keywords or []) if k}
-
-    if not doc_keywords or not company_keywords:
+    if not cap.tech_keywords:
         return 0.0
 
-    overlap = doc_keywords.intersection(company_keywords)
-    # fraction of company skills that appear in RFP
-    return round(len(overlap) / len(company_keywords) * 100, 2)
+    company_text = " ".join(cap.tech_keywords)
+    company_emb = _embedding_model.encode(company_text)
+
+    sims = []
+
+    for c in DocumentChunk.objects.filter(document=document):
+        emb = np.array(c.embedding)
+
+        sim = np.dot(company_emb, emb) / (
+            np.linalg.norm(company_emb) * np.linalg.norm(emb)
+        )
+
+        sims.append(sim)
+
+    if not sims:
+        return 0.0
+
+    return round(max(sims) * 100, 2)
 
 
 def _compute_budget_fit(rfp_budget: int, cap: CompanyCapability) -> float:
@@ -365,11 +368,68 @@ def _compute_budget_fit(rfp_budget: int, cap: CompanyCapability) -> float:
     return 0.0
 
 
+# ----------------------------
+# computing complexity based on size and chunk count
+def _compute_complexity(document: Document) -> float:
+    """
+    Rough project complexity based on document size + chunk count.
+    0–100 scale.
+    """
+    text_len = len(document.content_preview or "")
+    chunk_count = DocumentChunk.objects.filter(document=document).count()
+
+    complexity = (text_len / 1000) + (chunk_count * 2)
+
+    return min(100.0, round(complexity, 2))
+
+# ----------------------------
+# computing compliance based on keywords
+
+def _compute_compliance(document: Document) -> float:
+    """
+    Estimates compliance / regulatory burden from keywords.
+    0–100 scale.
+    """
+    keywords = [
+        "cert-in",
+        "iso",
+        "audit",
+        "security",
+        "government",
+        "hosting",
+        "penetration",
+        "meity",
+        "nic",
+    ]
+
+    text = (document.content_preview or "").lower()
+
+    hits = sum(1 for k in keywords if k in text)
+
+    return min(100.0, hits * 15)
+
+# ----------------------------
+# computes timeline pressure but checking it with the complexity
+
+def _compute_timeline_pressure(rfp_timeline_weeks, complexity):
+    """
+    Measures deadline pressure vs project complexity.
+    Higher = more risky.
+    """
+    if not rfp_timeline_weeks or rfp_timeline_weeks <= 0:
+        return 0.0
+
+    pressure = complexity / rfp_timeline_weeks
+
+    return min(100.0, round(pressure * 10, 2))
+
 def _compute_timeline_fit(rfp_timeline_weeks: int, cap: CompanyCapability) -> float:
     """
     0–100 measure: is the RFP timeline realistic for us?
     """
+
     rfp_timeline_weeks = _safe_int(rfp_timeline_weeks, 0)
+
     if rfp_timeline_weeks <= 0:
         return 0.0
 
@@ -385,73 +445,124 @@ def _compute_timeline_fit(rfp_timeline_weeks: int, cap: CompanyCapability) -> fl
     return max(0.0, 100.0 - extra * 5)
 
 
-def _compute_capacity_fit(team_size_required: int, cap: CompanyCapability) -> float:
-    """
-    0–100 measure: does required team size fit within our max_team_size?
-    """
-    team_size_required = _safe_int(team_size_required, 0)
-    if team_size_required <= 0:
-        return 0.0
-
-    if team_size_required <= cap.max_team_size:
-        return 100.0
-
-    # if they want more than our max, give a ratio score
-    return round(cap.max_team_size / team_size_required * 100, 2)
 
 
 def evaluate_and_save(document: Document) -> RFPEvaluation:
     """
-    Main scoring function:
-    - Reads Document + CompanyCapability + keywords
-    - Computes scores
-    - Saves/updates RFPEvaluation
-    - Updates Document.status and processed flag
+    Enterprise-style RFP evaluation:
+
+    STEP 1: Hard gates (instant reject)
+    STEP 2: Core capability score
+    STEP 3: Risk score
+    STEP 4: Final score = Core - Risk*0.3
+    STEP 5: Decision bands
     """
+
     cap = _get_company_capability()
 
-    # Prefer explicit rfp_* fields. If missing, try rfp_metadata JSON.
-    meta = getattr(document, "rfp_metadata", None) or {}
-    rfp_budget = document.rfp_budget or meta.get("budget_in_inr") or 0
-    rfp_timeline = document.rfp_timeline_weeks or meta.get("timeline_weeks") or 0
-    rfp_team = document.rfp_team_size_required or meta.get("team_size_required") or 0
+    # --------------------
+    # Load extracted RFP values
+    # --------------------
 
-    rfp_budget = _safe_int(rfp_budget, 0)
-    rfp_timeline = _safe_int(rfp_timeline, 0)
-    rfp_team = _safe_int(rfp_team, 0)
+    meta = getattr(document, "rfp_metadata", None) or {}
+
+    rfp_budget = _safe_int(document.rfp_budget or meta.get("budget_in_inr"), 0)
+    rfp_timeline = _safe_int(document.rfp_timeline_weeks or meta.get("timeline_weeks"), 0)
+
+    # --------------------
+    # Compute base metrics
+    # --------------------
 
     technical = _compute_technical_fit(document, cap)
     budget = _compute_budget_fit(rfp_budget, cap)
     timeline = _compute_timeline_fit(rfp_timeline, cap)
-    capacity = _compute_capacity_fit(rfp_team, cap)
 
-    # Weights – tweak later if needed
-    w_tech, w_budget, w_timeline, w_capacity = 0.3, 0.4, 0.2, 0.1
-    overall = round(
-        technical * w_tech +
-        budget * w_budget +
-        timeline * w_timeline +
-        capacity * w_capacity,
-        2,
+    complexity = _compute_complexity(document)
+    compliance = _compute_compliance(document)
+    timeline_pressure = _compute_timeline_pressure(rfp_timeline, complexity)
+
+    # ======================================================
+    # STEP 1 — HARD GATES
+    # ======================================================
+
+    hard_fail_reasons = []
+
+    if budget == 0:
+        hard_fail_reasons.append("Budget outside acceptable range")
+
+    if timeline == 0:
+        hard_fail_reasons.append("Timeline not feasible")
+
+    if technical < 40:
+        hard_fail_reasons.append("Technical capability too low")
+
+    if hard_fail_reasons:
+        reasoning = "Hard rejection: " + "; ".join(hard_fail_reasons)
+
+        evaluation, _ = RFPEvaluation.objects.update_or_create(
+            document=document,
+            defaults={
+                "technical_fit_score": technical,
+                "budget_fit_score": budget,
+                "timeline_fit_score": timeline,
+                "overall_fit_score": 0,
+                "decision": "REJECT",
+                "reasoning": reasoning,
+            },
+        )
+
+        document.status = "REJECTED"
+        document.processed = True
+        document.save(update_fields=["status", "processed"])
+
+        return evaluation
+
+    # ======================================================
+    # STEP 2 — CORE CAPABILITY SCORE
+    # ======================================================
+
+    core_fit = round(
+        technical * 0.4 +
+        budget * 0.3 +
+        timeline * 0.3,
+        2
     )
 
-    # Decision rules
-    if overall < 60 or capacity < 40 or budget == 0.0:
-        decision = "REJECT"
-        doc_status = "REJECTED"
-    elif overall >= 80:
+    # ======================================================
+    # STEP 3 — RISK SCORE
+    # ======================================================
+
+    risk = round(
+        timeline_pressure * 0.4 +
+        compliance * 0.3 +
+        complexity * 0.3,
+        2
+    )
+
+    # ======================================================
+    # STEP 4 — FINAL SCORE
+    # ======================================================
+
+    final_score = round(core_fit - (risk * 0.3), 2)
+
+    # ======================================================
+    # STEP 5 — DECISION
+    # ======================================================
+
+    if final_score >= 70:
         decision = "ACCEPT"
         doc_status = "ACCEPTED"
-    else:
+    elif final_score >= 50:
         decision = "REVIEW"
         doc_status = "REVIEW"
+    else:
+        decision = "REJECT"
+        doc_status = "REJECTED"
 
     reasoning = (
-        f"Technical fit: {technical}% | "
-        f"Budget fit: {budget}% | "
-        f"Timeline fit: {timeline}% | "
-        f"Capacity fit: {capacity}% | "
-        f"Overall: {overall}% → Decision: {decision}"
+        f"CoreFit={core_fit}% | Risk={risk}% | Final={final_score}% | "
+        f"Technical={technical}% | Budget={budget}% | Timeline={timeline}% | "
+        f"Complexity={complexity}% | Compliance={compliance}% | Pressure={timeline_pressure}%"
     )
 
     evaluation, _ = RFPEvaluation.objects.update_or_create(
@@ -460,14 +571,12 @@ def evaluate_and_save(document: Document) -> RFPEvaluation:
             "technical_fit_score": technical,
             "budget_fit_score": budget,
             "timeline_fit_score": timeline,
-            "capacity_fit_score": capacity,
-            "overall_fit_score": overall,
+            "overall_fit_score": final_score,
             "decision": decision,
             "reasoning": reasoning,
         },
     )
-
-    # Update document status + mark processed
+    
     document.status = doc_status
     document.processed = True
     document.save(update_fields=["status", "processed"])

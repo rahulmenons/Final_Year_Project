@@ -40,11 +40,6 @@ class Document(models.Model):
         help_text="No. of days allowed for submission (if mentioned)"
     )
 
-    rfp_team_size_required = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="Number of people required by client",
-    )
 
     # store raw metadata JSON returned by Gemini (for audit/debug)
     rfp_metadata = models.JSONField(null=True, blank=True, help_text="Raw extracted RFP metadata JSON (from Gemini)")
@@ -149,7 +144,7 @@ class CompanyCapability(models.Model):
     expected_no_of_days_for_submission = models.PositiveIntegerField(
         null=True, blank=True
     )
-
+    
     # meta
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -321,12 +321,23 @@ export default function DocumentUpload() {
                     {renderDecisionBadge(evaluation.decision)}
                   </div>
                   <div className={styles.evaluationGrid}>
-                    <div className={styles.scoreItem}>Technical Fit: <span className={styles.scoreValue}>{evaluation.technical_fit_score}%</span></div>
-                    <div className={styles.scoreItem}>Budget Fit: <span className={styles.scoreValue}>{evaluation.budget_fit_score}%</span></div>
-                    <div className={styles.scoreItem}>Timeline Fit: <span className={styles.scoreValue}>{evaluation.timeline_fit_score}%</span></div>
-                    <div className={styles.scoreItem}>Capacity Fit: <span className={styles.scoreValue}>{evaluation.capacity_fit_score}%</span></div>
-                    <div className={`${styles.scoreItem} ${styles.scoreOverall}`}>Overall Fit: <span className={styles.scoreValue}>{evaluation.overall_fit_score}%</span></div>
+                    <div className={styles.scoreItem}>
+                      Technical Fit: <span className={styles.scoreValue}>{evaluation.technical_fit_score}%</span>
+                    </div>
+
+                    <div className={styles.scoreItem}>
+                      Budget Fit: <span className={styles.scoreValue}>{evaluation.budget_fit_score}%</span>
+                    </div>
+
+                    <div className={styles.scoreItem}>
+                      Timeline Fit: <span className={styles.scoreValue}>{evaluation.timeline_fit_score}%</span>
+                    </div>
+
+                    <div className={`${styles.scoreItem} ${styles.scoreOverall}`}>
+                      Overall Fit: <span className={styles.scoreValue}>{evaluation.overall_fit_score}%</span>
+                    </div>
                   </div>
+
                   <p className={styles.reasoningText}>
                     <span className={styles.infoLabel}>Reasoning:</span> {evaluation.reasoning}
                   </p>

@@ -10,7 +10,7 @@ from .services import (
     DocumentParser,
     KeywordExtractor,
     DocumentSummarizer,
-    evaluate_and_save,   # ✅ NEW IMPORT
+    evaluate_and_save,
     RFPMetadataExtractor,
     index_document,
 )
@@ -20,97 +20,73 @@ class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
     parser_classes = (MultiPartParser, FormParser)
-    
-    @action(detail=False, methods=['post'], url_path='upload')
+
+    @action(detail=False, methods=["post"], url_path="upload")
     def upload_document(self, request):
-        """Upload and process document to extract keywords, summary, and evaluation"""
+
         serializer = FileUploadSerializer(data=request.data)
-        
+
         if not serializer.is_valid():
-            return Response(
-                serializer.errors, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        uploaded_file = serializer.validated_data['file']
-        file_extension = uploaded_file.name.split('.')[-1].lower()
-        
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        uploaded_file = serializer.validated_data["file"]
+        file_extension = uploaded_file.name.split(".")[-1].lower()
+
         try:
-            # 1) Parse document
-            print(f"Parsing {uploaded_file.name}...")
+            # 1 Parse document
             parser = DocumentParser()
             text = parser.parse(uploaded_file, file_extension)
-            
+
             if not text:
-                return Response(
-                    {'error': 'Could not extract text from document'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            print(f"Extracted {len(text)} characters of text")
-            
-            # 2) Extract keywords
-            print("Extracting keywords...")
+                return Response({"error": "Could not extract text"}, status=400)
+
+            # 2 Keywords
             extractor = KeywordExtractor()
             keywords_with_scores = extractor.extract_keywords(text, top_n=15)
-            print(f"Found {len(keywords_with_scores)} keywords")
-            
-            # 3) Generate summary
-            print("Generating summary...")
+
+            # 3 Summary
             summarizer = DocumentSummarizer()
             summary_text = summarizer.generate_summary(text, max_length=350)
-            print(f"Summary generated: {len(summary_text)} characters")
 
-            # 4) NEW: Extract RFP metadata (budget, timeline, team size)
-            print("Extracting RFP metadata (budget/timeline/team size)...")
+            # 4 RAG Metadata
             metadata_extractor = RFPMetadataExtractor()
             meta = metadata_extractor.extract_metadata()
-            print("🎯 EXTRACTED RFP METADATA (from Gemini)")
-            print(meta)
-            print(f"Metadata extracted: {meta}")
-            
+
             rfp_budget = meta.get("budget_in_inr") or 0
             rfp_timeline_weeks = meta.get("timeline_weeks") or 0
-            rfp_team_size_required = meta.get("team_size_required") or 0
 
-            print(f"Budget extracted: {rfp_budget}")
-            print(f"Timeline extracted: {rfp_timeline_weeks}")
-            print(f"Team size extracted: {rfp_team_size_required}")
-
-            
-            # 5) Save to database
+            # 5 Save
             with transaction.atomic():
+
                 document = Document.objects.create(
                     filename=uploaded_file.name,
                     file=uploaded_file,
                     file_type=file_extension,
                     content_preview=text[:1000],
                     summary=summary_text,
-                    processed=False,  # will be set True in evaluate_and_save
+                    processed=False,
                     rfp_budget=rfp_budget,
                     rfp_timeline_weeks=rfp_timeline_weeks,
-                    rfp_team_size_required=rfp_team_size_required,
+
                 )
-                
-                #RAG Indexing
+
+                # RAG indexing
                 index_document(document, text)
 
-                
                 for keyword_text, score in keywords_with_scores:
-                    keyword, created = Keyword.objects.get_or_create(
-                        keyword=keyword_text
-                    )
+                    keyword, _ = Keyword.objects.get_or_create(keyword=keyword_text)
                     DocumentKeyword.objects.create(
                         document=document,
                         keyword=keyword,
-                        relevance_score=float(score)
+                        relevance_score=float(score),
                     )
 
-                # 6) Evaluate RFP vs company capability
                 evaluation = evaluate_and_save(document)
-            
+
             response_serializer = DocumentSerializer(document)
             data = response_serializer.data
+
+            # ✅ FIXED evaluation mapping
             data["evaluation"] = {
                 "technical_fit_score": evaluation.technical_fit_score,
                 "budget_fit_score": evaluation.budget_fit_score,
@@ -120,24 +96,18 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "decision": evaluation.decision,
                 "reasoning": evaluation.reasoning,
             }
-            # Include raw extracted meta as well if you want to show in UI
+
+            # ✅ FIXED metadata mapping
             data["rfp_metadata"] = {
                 "budget_in_inr": rfp_budget,
                 "timeline_weeks": rfp_timeline_weeks,
-                "team_size_required": rfp_team_size_required,
+
                 "extraction_confidence": meta.get("confidence"),
                 "extraction_notes": meta.get("notes"),
             }
 
-            return Response(
-                data, 
-                status=status.HTTP_201_CREATED
-            )
-            
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            return Response(
-                {'error': str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response(data, status=status.HTTP_201_CREATED)
 
+        except Exception as e:
+            print(e)
+            return Response({"error": str(e)}, status=500)
